@@ -1,0 +1,515 @@
+---
+title: "Project1"
+author: "Marcella Sarti Arellano"
+date: "2024-09-10"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Research question
+1.a)
+Does terrain characteristics (eg. exposition, slope) correlate with land cover, ie. are there major differences between single land covers?
+
+# Libraries
+```{r}
+library(terra)
+library(raster)
+library(randomForest)
+library(caret)
+library(data.table)
+library(sf)
+library(dplyr)
+library(vcd)
+library(FactoMineR)
+library(factoextra)
+```
+
+# 1. Creating a Stack
+Sentinel raster with bands 2 (blue), 3 (green), 4 (red) & 8 (NIR).
+```{r}
+rast1 <- rast("WVP_10m.jp2")
+rast2 <- rast("AOT_10m.jp2")
+rast3 <-  rast("B02_10m.jp2")
+rast4 <-  rast("B03_10m.jp2")
+rast5 <-  rast("B04_10m.jp2")
+rast6 <-  rast("B08_10m.jp2")
+rast7 <-  rast("TCI_10m.jp2")
+
+rast_fogo <- c(rast3,rast4,rast5,rast6) 
+plot(rast_fogo)
+```
+
+
+
+Crop & Stack
+
+```{r}
+# extension
+
+crop_extent <- ext(c(765000,795000,1638000,1667000)) #xmin, xmax, ymin, ymax
+
+# crop stack
+
+fogo_crop <- crop(rast_fogo, crop_extent)
+```
+
+```{r}
+plot(fogo_crop$B08_10m)
+```
+
+```{r}
+writeRaster(fogo_crop, "fogo_crop.tif", overwrite=TRUE)
+```
+
+# 2. NDVI
+
+True color composition
+```{r}
+# true
+plotRGB(fogo_crop, b =1,
+        g =2,
+        r = 3,
+        stretch="lin")
+```
+
+
+```{r}
+# false
+
+plotRGB(fogo_crop, b =1,
+        g =2,
+        r = 4, # NRI
+        stretch="lin")
+```
+Calculate NDVI
+ndvi = (NIR - RED)/(NIR + RED)
+
+```{r}
+ndvi = (fogo_crop[[4]] - fogo_crop[[3]]) / (fogo_crop[[4]] + fogo_crop[[3]])
+
+plot(ndvi)
+
+```
+
+Other method: function for NDVI
+
+```{r}
+NDVI <- function(nir, red){
+  if (length(nir) != length(red)){
+    stop("NIR and RED dont match")
+  }
+  
+  ndvi <- (nir-red) / (nir+red)
+  names(ndvi)<- "ndvi"
+  
+  ndvi
+}
+
+```
+
+ 
+```{r}
+# Apply the function
+
+ndvi_fog <-NDVI(fogo_crop$B08_10m, fogo_crop$B04_10m)
+
+plot(ndvi_fog)
+```
+
+
+
+
+Unir NDVI con el stack
+```{r}
+result <- c(fogo_crop, ndvi)
+
+names(result) <- c("B02_may", "B03_may","B04_may", "B08_may","NDVI_may")
+
+```
+
+
+```{r}
+writeRaster(result, "fogo_ndvi2.tif", overwrite=TRUE, datatype = "FLT4S" )
+```
+
+# 3. Classification and Regresion with Random forest
+
+```{r}
+sentinel_nov <- rast("sentinel2_20221127_ndvi.tif")
+sentinel_may <- rast("fogo_ndvi2.tif")
+```
+
+```{r}
+# combine
+sentinel <- c(sentinel_may, sentinel_nov)
+```
+
+
+```{r}
+# polygons
+
+ref_data <- vect("reference1.gpkg")
+
+table(ref_data$class)
+```
+
+we verify if it's the same place in may and nov
+
+```{r}
+# may
+plotRGB(sentinel, b =1,
+        g =2,
+        r = 3,
+        stretch="lin")
+```
+
+
+```{r}
+# nov
+plotRGB(sentinel, b =6,
+        g =7,
+        r = 8,
+        stretch="lin")
+
+plot(ref_data, add=TRUE, col ="red")
+```
+
+
+Random forest
+
+```{r}
+df_extract <- extract(sentinel, ref_data, na.rm = TRUE)
+ref_data$ID <- seq(1, nrow( ref_data))
+df_extract <- merge(df_extract, ref_data)
+
+
+# create model 
+
+rfmodel = randomForest(x = df_extract[,c("B02_may", "B03_may", "B04_may", "B08_may", "NDVI_may",
+                                 "B02_nov", "B03_nov", "B04_nov", "B08_nov", "NDVI_nov")],
+                       y = as.factor( df_extract[, c("class")] ), ntree = 100)
+
+```
+
+
+
+Criteria for classification:
+
+* Agriculture: green pixels, red color in NRI, plots in Google satellite 
+*   Basaltic rock (old): combination of black, gray and dark green colors, in Google satellite is brown with a pronounce texture 
+*   Basaltic rock (young): most dark pixels patches
+*   Forest: large trees in a big patch, red color in NRI, deep green in Google satellite
+*   Human settlements: infrastructure in Google satellite
+*  Land with little or no vegetation: mostly uniform beige pixels with some green
+*   Ocean: different shades of blue pixels colors
+
+```{r}
+# apply model
+
+lcc <- predict(sentinel, rfmodel)
+plot(lcc, col=c("orange", "brown", "black", "darkgreen","purple","yellowgreen","darkblue"))
+```
+
+# 4. Accuracy of the model
+
+```{r}
+# Create a partition (70% training data, 30% test data)
+trainIndex <- createDataPartition(df_extract$class, p = 0.7, list = FALSE)
+
+# Split data into training and testing sets
+trainData <- df_extract[trainIndex, ] #data que si esta viendo el modelo
+
+testData  <- df_extract[-trainIndex, ] #data que no esta viendo el modelo
+```
+
+```{r}
+rfmodel2 = randomForest(x = trainData[,c("B02_may", "B03_may", "B04_may", "B08_may", "NDVI_may",
+                                           "B02_nov", "B03_nov", "B04_nov", "B08_nov", "NDVI_nov")],
+                       y = as.factor( trainData[, c("class")] ),
+                       ntree = 100)
+```
+
+Apply model with traindata and testdata
+```{r}
+lcc2 = predict(sentinel, rfmodel2)
+plot(lcc2, col=c("orange", "brown", "black", "darkgreen","purple","yellowgreen","darkblue"))
+```
+```{r}
+writeRaster(lcc2, "fogo_model2.tif", overwrite = TRUE)
+```
+
+
+Accuracy with test data
+
+```{r}
+# predict the classes of the independent test set
+test_prediction = predict(rfmodel2, testData)
+
+# confusion matrix
+cfm = table(testData$class, test_prediction)
+cfm
+# accuracy: sum of diagonals divided by all
+sum(diag(cfm))/sum(cfm)
+
+```
+
+
+Cross validation
+
+```{r}
+# set up cross validation with 5 folds 
+trc = trainControl(method = "cv", number = 5)
+
+
+# tune model mtry
+rfmodel_cv_may = caret::train(x = trainData[,c("B02_may", "B03_may", "B04_may", "B08_may", "NDVI_may")],
+                          y = trainData[, c("class")],
+                          method = "rf",
+                          trControl = trc,
+                          ntree = 100,
+                          tuneLength = 3) 
+
+rfmodel_cv_nov = caret::train(x = trainData[,c("B02_nov", "B03_nov", "B04_nov", "B08_nov", "NDVI_nov")],
+                          y = trainData[, c("class")],
+                          method = "rf",
+                          trControl = trc,
+                          ntree = 100,
+                          tuneLength = 3)
+
+rfmodel_cv_full = caret::train(x = trainData[,c("B02_may", "B03_may", "B04_may", "B08_may", "NDVI_may",
+                                              "B02_nov", "B03_nov", "B04_nov", "B08_nov", "NDVI_nov")],
+                          y = trainData[, c("class")],
+                          method = "rf",
+                          trControl = trc,
+                          ntree = 100,
+                          tuneLength = 3)
+
+```
+
+```{r}
+# predict the classes of the independet test set
+
+test_prediction <- predict(rfmodel_cv_full, testData)
+
+# confusion matrix
+
+confusionMatrix(as.factor(testData$class), test_prediction, mode="everything")
+```
+* Accuracy:
+
+Definition: The proportion of correctly classified instances among the total instances.
+Value: 0.9531 (95.31%)
+Interpretation: The model correctly classified 95.31% of all instances.
+
+* 95% CI (Confidence Interval):
+
+Definition: The range within which the true accuracy is expected to fall, with 95% confidence.
+Value: (0.9511, 0.9551)
+Interpretation: We are 95% confident that the true accuracy of the model lies between 95.11% and 95.51%.
+
+
+* P-Value [Acc > NIR]:
+
+Definition: The p-value testing whether the model's accuracy is significantly better than the No Information Rate (NIR), which is the accuracy expected by chance.
+Value: < 2.2e-16
+Interpretation: The model's accuracy is highly significantly better than random chance, with a p-value much smaller than 0.05.
+
+* Kappa:
+
+Definition: A measure of the agreement between predicted and actual classifications, adjusting for chance agreement.
+Value: 0.9364
+Interpretation: There is a very high level of agreement between the predicted and actual classes, much better than random chance.
+
+* Precision (Positive Predictive Value)~User's accuracy:
+
+Definition: The proportion of correctly predicted positive instances among all predicted positives.
+Interpretation: Precision is calculated per class, for example:
+For "bare_ground": 0.9117 (91.17%) means that when the model predicts "bare_ground," it is correct 91.17% of the time.
+Precision values vary by class, reflecting the model's reliability for each class prediction.
+
+
+* Recall (Sensitivity)~Procuder's accuracy:
+
+Definition: The proportion of correctly predicted positives among all actual positives.
+Interpretation: Recall is also calculated per class:
+For "bare_ground": 0.8734 (87.34%) means that the model correctly identifies 87.34% of all actual "bare_ground" instances.
+Higher recall means fewer actual positives are missed.
+
+* F1 Score:
+
+Definition: The harmonic mean of precision and recall, providing a balanced measure that accounts for both false positives and false negatives.
+Interpretation: A high F1 score indicates a good balance between precision and recall.
+
+# 5. Relations with terrain characteristics
+
+```{r}
+# data
+elevation<- rast("elevation_fogo.tif")
+
+aspect <-rast("aspect_fogo.tif")
+
+slope <- rast("slope_zona26.tif")
+
+```
+
+Extract values from the rasters
+
+```{r}
+# Elevation 
+lcc2_resampled <- resample(lcc2, elevation, method = "near")
+
+values_df <- as.data.frame(c(lcc2_resampled, elevation), na.rm = TRUE)
+colnames(values_df) <- c("land_cover", "elevation")
+
+values_df$land_cover <- as.factor(values_df$land_cover)
+values_df$land_cover_num <- as.numeric(as.factor(values_df$land_cover))
+
+# Aspect
+
+lcc3_resampled <- resample(lcc2, aspect, method = "near")
+
+values_df2 <- as.data.frame(c(lcc3_resampled, aspect), na.rm = TRUE)
+colnames(values_df2) <- c("land_cover", "aspect")
+
+values_df2$land_cover <- as.factor(values_df2$land_cover)
+values_df2$land_cover_num <- as.numeric(as.factor(values_df2$land_cover))
+
+# Slope
+
+lcc4_resampled <- resample(lcc2, slope, method = "near")
+
+values_df3 <- as.data.frame(c(lcc4_resampled, slope), na.rm = TRUE)
+colnames(values_df3) <- c("land_cover", "slope")
+
+values_df3$land_cover <- as.factor(values_df3$land_cover)
+values_df3$land_cover_num <- as.numeric(as.factor(values_df3$land_cover))
+
+
+```
+
+
+## 5.0 Normality 
+
+```{r}
+# Elevation
+
+hist(values_df$elevation, main="Elevation", xlab="elevation")
+
+```
+```{r}
+# Aspect
+
+hist(values_df2$aspect, main="Aspect", xlab="Aspect")
+
+```
+
+```{r}
+# Elevation
+
+hist(values_df3$slope, main="Slope", xlab="Slope")
+
+```
+Because of the lack of normality in elevation and slope, we use a non-parametric method: Kruskal-Wallis, which is adequate to test a categorical variable with a continuous.It evaluates the median of the slope/elevation within 2 or more groups of land cover. it's the non-parametric alternative for ANOVA.
+
+For Aspect, because we have 2 categorical variables, we will use contingency tables, Cramer's and Fisher's test.
+
+## 5.1. Elevation
+
+
+```{r}
+# Kruskal test
+kruskal_elevation <- kruskal.test(elevation ~ land_cover, data = values_df)
+kruskal_elevation
+```
+P-value < 0.05, elevation can differ with the type of land cover. But to see which of the land use may be the one that has the strongest relation we can visualize it on a box-plot.
+
+```{r}
+boxplot(elevation ~ land_cover, data = values_df, 
+        xlab = "Land Cover", 
+        ylab = "Elevation", 
+        main = "Elevation & Land Cover",
+        col = "lightblue", 
+        las = 2)
+```
+Ocean and basaltic rock (old) may be the land cover types with the highest relation with elevation because of its small variability.
+
+## 5.2. Aspect
+
+```{r}
+# names to aspect
+values_df2 <- values_df2 %>%
+  mutate(aspect2 = case_when(
+    aspect == 2 ~ "N",
+    aspect == 3 ~ "NE",
+    aspect == 4 ~ "E",
+    aspect == 5 ~ "SE",
+    aspect == 6 ~ "S",
+    aspect == 7 ~ "SW",
+    aspect == 8 ~ "W",
+    aspect == 9 ~ "NW",
+    aspect == 10 ~ "N",
+    TRUE ~ as.character(aspect)
+  ))
+
+# contingency table
+table_cont<- table(values_df2$land_cover, values_df2$aspect2)
+filtered_table <- table_cont[rowSums(table_cont) > 0, colSums(table_cont) > 0]
+
+
+```
+
+
+```{r}
+# Correspondence analysis
+ac <- CA(filtered_table, graph = FALSE)
+
+summary(ac)
+
+```
+```{r}
+# plot correspondence analysis
+fviz_ca_biplot(ac, repel = TRUE)
+
+```
+p-value <0.05 = significant relation between the 2 variables
+
+DIM 1:
+
+On the right side of Dim.1: Categories such as "Basaltic rock (young)", "Forest", and columns like "NE" are found, suggesting an association of these areas with more natural and geologically young environments.
+
+On the left side of Dim.1: Categories like "Land with little or no vegetation" are grouped, which is associated with arid or sparsely vegetated terrains, along with directions like "W" and "SW."
+
+DIM 2:
+
+Above Dim.2: "Human settlements" and "Basaltic rock (old)" are located.
+
+Below Dim.2: "Agriculture" is found, implying that this dimension also distinguishes predominantly agricultural areas from other categories. "NW" and "S" are near "Agriculture," which could indicate some relationship or geographical proximity to cultivated areas.
+
+Dim.1 seems to represent a gradient of vegetation, ranging from arid or sparsely vegetated areas to densely forested areas or young basaltic rocks.
+
+Dim.2 captures a gradient of human intervention and geological age.
+
+
+## 5.3. Slope
+```{r}
+# Kruskal test
+kruskal_slope <- kruskal.test(slope ~ land_cover, data = values_df3)
+kruskal_slope
+```
+P-value < 0.05, slope can differ with the type of land cover. But to see which of the land use may be the one that has the strongest relation we can visualize it on a box-plot.
+
+```{r}
+boxplot(slope ~ land_cover, data = values_df3, 
+        xlab = "Land Cover", 
+        ylab = "Slope", 
+        main = "Slope & Land Cover",
+        col = "lightblue", 
+        las = 2)
+```
+
+Forest may be the land cover type with the highest relation with slope because of its small variability.
