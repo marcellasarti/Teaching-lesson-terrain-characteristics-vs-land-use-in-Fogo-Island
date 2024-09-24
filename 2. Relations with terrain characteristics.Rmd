@@ -1,5 +1,5 @@
 ---
-title: "Project1"
+title: "Terrain characteristics vs Land use in Fogo Island"
 author: "Marcella Sarti Arellano"
 date: "2024-09-10"
 output:
