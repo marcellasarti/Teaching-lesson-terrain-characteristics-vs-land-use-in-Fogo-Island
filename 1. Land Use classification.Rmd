@@ -1,15 +1,11 @@
 ---
-title: "Project1"
+title: "Terrain characteristics vs Land use in Fogo Island"
 author: "Marcella Sarti Arellano"
 date: "2024-09-10"
 output:
   html_document: default
   word_document: default
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
 
 # Research question
 1.a)
@@ -43,8 +39,6 @@ rast7 <-  rast("TCI_10m.jp2")
 rast_fogo <- c(rast3,rast4,rast5,rast6) 
 plot(rast_fogo)
 ```
-
-
 
 Crop & Stack
 
